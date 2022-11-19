@@ -357,7 +357,7 @@ def accelerate_gen_fn(gen_fn, max_attempts=1):
     return new_gen_fn
 
 def get_stable_gen(problem, collisions=True, **kwargs):
-    obstacles = problem.fixed if collisions else []
+    obstacles = problem.fixed + problem.movable if collisions else []
     def gen(body, surface):
         # TODO: surface poses are being sampled in pr2_belief
         if surface is None:
@@ -391,16 +391,18 @@ def iterate_approach_path(robot, arm, gripper, pose, grasp, body=None):
         set_pose(gripper, multiply(tool_pose, tool_from_root))
         if body is not None:
             set_pose(body, multiply(tool_pose, grasp.value))
+            # print (multiply(tool_pose, tool_from_root), multiply(tool_pose, grasp.value))
         yield
 
 def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, learned=True):
     robot = problem.robot
-    obstacles = problem.fixed if collisions else []
+    obs = problem.fixed + problem.movable if collisions else []
     gripper = problem.get_gripper()
 
     def gen_fn(arm, obj, pose, grasp):
+        obstacles = [x for x in obs if x != obj]
         pose.assign()
-        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
+        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst, below_epsilon=1e-2)}
         for _ in iterate_approach_path(robot, arm, gripper, pose, grasp, body=obj):
             if any(pairwise_collision(gripper, b) or pairwise_collision(obj, b) for b in approach_obstacles):
                 return
@@ -436,14 +438,15 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
 
 def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
-    obstacles = problem.fixed if collisions else []
+    obs = problem.fixed + problem.movable if collisions else []
     if is_ik_compiled():
         print('Using ikfast for inverse kinematics')
     else:
         print('Using pybullet for inverse kinematics')
 
     def fn(arm, obj, pose, grasp, base_conf):
-        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
+        obstacles = [x for x in obs if x != obj]
+        approach_obstacles = [obst for obst in obstacles if not is_placement(obj, obst, below_epsilon=1e-2)]
         gripper_pose = multiply(pose.value, invert(grasp.value)) # w_f_g = w_f_o * (g_f_o)^-1
         #approach_pose = multiply(grasp.approach, gripper_pose)
         approach_pose = multiply(pose.value, invert(grasp.approach))
@@ -458,8 +461,8 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
         set_joint_positions(robot, arm_joints, default_conf) # default_conf | sample_fn()
         grasp_conf = pr2_inverse_kinematics(robot, arm, gripper_pose, custom_limits=custom_limits) #, upper_limits=USE_CURRENT)
                                             #nearby_conf=USE_CURRENT) # upper_limits=USE_CURRENT,
-        if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles): # [obj]
-            #print('Grasp IK failure', grasp_conf)
+        if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in approach_obstacles): # [obj]
+            # print('Grasp IK failure', grasp_conf)
             #if grasp_conf is not None:
             #    print(grasp_conf)
             #    #wait_if_gui()
@@ -468,7 +471,7 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
         #                                       upper_limits=USE_CURRENT, nearby_conf=USE_CURRENT)
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
-            #print('Approach IK failure', approach_conf)
+            # print('Approach IK failure', approach_conf)
             #wait_if_gui()
             return None
         approach_conf = get_joint_positions(robot, arm_joints)
